@@ -1,0 +1,140 @@
+================================================================================
+  ПОШАГОВЫЙ ЗАПУСК ПРОЕКТА (Windows + PowerShell)
+  STEEL&BLADE — запись в парикмахерскую (Backend Django + Frontend Vite)
+================================================================================
+
+Подготовка (один раз на компьютере)
+-----------------------------------
+1) База данных — на выбор:
+   А) PostgreSQL: установите сервер, создайте базу hair_salon_db, задайте пароль
+      пользователю postgres (в командах ниже укажите ТОТ ЖЕ пароль в POSTGRES_PASSWORD).
+      Если видите ошибку «не прошёл проверку подлинности» / password authentication
+      failed — пароль неверный: исправьте $env:POSTGRES_PASSWORD или файл .env
+   Б) Без PostgreSQL (проще для курсового на своём ПК): используйте SQLite — шаг A3a
+
+2) Установите Node.js (LTS) и Python 3.12 или 3.13
+   Важно: для пакета catboost на Python 3.14 pip часто не ставится — берите 3.12/3.13.
+
+3) Откройте PowerShell.
+
+
+ЧАСТЬ A — BACKEND (вводите по очереди)
+---------------------------------------
+Шаг A1. Перейти в папку backend:
+
+  cd путь\к\проекту\Kursowaya\Backend
+
+  (пример: cd C:\Users\ASUS\Desktop\Kursowaya\Backend)
+
+Шаг A2. Виртуальное окружение и зависимости:
+
+  python -m venv .venv
+  .\.venv\Scripts\Activate.ps1
+  pip install -r requirements.txt
+
+Шаг A3a. Только если работаете БЕЗ PostgreSQL (файл db.sqlite3 в папке Backend):
+
+  $env:USE_SQLITE = "1"
+
+  Дальше шаг A4 (переменные POSTGRES_* не нужны).
+
+Шаг A3b. Только если работаете С PostgreSQL (одна сессия PowerShell):
+
+  $env:POSTGRES_DB = "hair_salon_db"
+  $env:POSTGRES_USER = "postgres"
+  $env:POSTGRES_PASSWORD = "postgres"
+  $env:POSTGRES_HOST = "127.0.0.1"
+  $env:POSTGRES_PORT = "5432"
+
+  (замените POSTGRES_PASSWORD на реальный пароль пользователя postgres)
+
+Шаг A4. Миграции:
+
+  python manage.py migrate
+
+Шаг A5. Модель ИИ (файл no_show_model.cbm) — нужна ДО seed, если хотите
+        автоматическую демо-разметку Aidata внутри seed:
+
+  python manage.py train_no_show_model --n 8000 --min-accuracy 0.75
+
+  Если catboost не установился — см. сообщение pip; используйте Python 3.12/3.13.
+
+Шаг A6. Демо-данные (роли, услуги, мастера + при необходимости разметка для AI-панели):
+
+  python manage.py seed_demo_data
+
+  Только справочники без AI-тестовых записей:
+
+  python manage.py seed_demo_data --skip-ai-labeled
+
+Шаг A7. Запуск API:
+
+  python manage.py runserver 127.0.0.1:8000
+
+Проверка: в браузере откройте http://127.0.0.1:8000/api/schema/
+
+
+ЧАСТЬ B — FRONTEND (второе окно PowerShell)
+-------------------------------------------
+Шаг B1. Перейти во frontend:
+
+  cd путь\к\проекту\Kursowaya\Frontend
+
+Шаг B2. Зависимости (первый раз):
+
+  npm install
+
+Шаг B3. Запуск интерфейса:
+
+  npm run dev -- --host 127.0.0.1 --port 8080
+
+Откройте: http://127.0.0.1:8080/
+
+
+ЧАСТЬ C — ВХОД ПОСЛЕ seed_demo_data
+------------------------------------
+В форме входа: Email + пароль.
+
+  Админ (демо):   admin_demo@example.com     / AdminPass123!
+  Мастер (демо):  master_demo@example.com    / MasterPass123!
+  Клиент (демо):  client_demo@example.com    / ClientPass123!
+
+Если вы не запускали seed и регистрировались сами — используйте свой email и пароль.
+
+Другие учётки из документации курса (если заведены вручную в БД) см. INSTRUKCIYA_AI.txt.
+
+
+ЧАСТЬ D — DOCKER (альтернатива A+B)
+-----------------------------------
+Из корня проекта (папка с docker-compose.yml):
+
+  docker compose up -d --build
+
+Затем один раз демо-данные:
+
+  docker compose exec backend python manage.py seed_demo_data
+
+Адреса: http://localhost:8080  и  http://localhost:8000
+
+Подробнее: INSTRUKCIYA_DOCKER.txt
+
+
+Полезные команды (по необходимости)
+-----------------------------------
+  python manage.py reset_ai_full             — полный сброс ИИ + демо *_demo, переобучение CatBoost и seed
+
+  После reset войдите снова как admin_demo@example.com / AdminPass123!
+  python manage.py generate_ai_tests          — только разметка Aidata для AI-панели
+  python manage.py align_demo_aidata        — подогнать вероятности под метки для строк «AI test:» (после обновления)
+  python manage.py backfill_ai_data          — пересчёт Aidata для всех записей
+  docker compose exec backend python manage.py backfill_ai_data   — то же в Docker
+  docker compose exec backend python manage.py reset_ai_full      — полный сброс ИИ в контейнере
+
+
+Доп. файлы
+----------
+  INSTRUKCIYA_DOCKER.txt  — только Docker
+  INSTRUKCIYA_AI.txt      — AI-панель, API, метрики
+  Backend\README.md       — кратко про backend и API
+
+================================================================================

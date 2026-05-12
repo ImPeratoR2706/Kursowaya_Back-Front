@@ -1,0 +1,12 @@
+django==6.0.3
+djangorestframework==3.17.1
+djangorestframework-simplejwt==5.5.1
+django-cors-headers==4.9.0
+inflection==0.5.1
+psycopg==3.2.12
+uritemplate==4.2.0
+
+# AI (CatBoost no-show): инференс и команда train_no_show_model
+numpy>=1.26.4,<3
+pandas>=2.1.0,<3
+catboost>=1.2.7,<1.3

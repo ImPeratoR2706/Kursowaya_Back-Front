@@ -1,0 +1,114 @@
+================================================================================
+  ИНСТРУКЦИЯ: ЗАПУСК ПРОЕКТА ЧЕРЕЗ DOCKER (docker-compose)
+  Проект: STEEL&BLADE (Hair salon booking)
+================================================================================
+
+  Локальный запуск без Docker: ZAPUSK_PO_SHAGAM.txt (в корне проекта).
+
+0) Требования
+-------------
+1) Установлен Docker Desktop (Windows)
+2) Docker Desktop запущен (статус Running)
+3) Включён Linux containers / WSL2 backend (по умолчанию в Docker Desktop)
+
+Проверка в терминале:
+  docker --version
+  docker compose version
+
+
+1) Подготовка переменных окружения (.env)
+----------------------------------------
+В корне проекта лежит файл:
+  .env
+
+Для docker-compose используются переменные PostgreSQL:
+  POSTGRES_DB
+  POSTGRES_USER
+  POSTGRES_PASSWORD
+
+Пример (можно оставить значения по умолчанию, если вас устраивает пароль):
+  POSTGRES_DB=hair_salon_db
+  POSTGRES_USER=postgres
+  POSTGRES_PASSWORD=postgres
+
+
+2) Запуск всех сервисов одной командой
+-------------------------------------
+В корне проекта (где docker-compose.yml) выполнить:
+  docker compose up -d --build
+
+После запуска будут доступны:
+  Frontend: http://localhost:8080
+  Backend:  http://localhost:8000
+  Django Admin: http://localhost:8000/admin/
+
+
+3) Миграции и демо-данные (seed)
+-------------------------------
+ВАЖНО:
+Файл docker-compose.yml запускает backend с командой (упрощённо):
+  python manage.py migrate
+  + при отсутствии файла модели: python manage.py train_no_show_model ...
+  + python manage.py runserver 0.0.0.0:8000
+
+То есть миграции применяются автоматически при старте контейнера backend;
+при первом запуске при необходимости создаётся файл CatBoost-модели неявки.
+
+Демо-данные (админ/мастер/клиент) создаются отдельной командой:
+  docker compose exec backend python manage.py seed_demo_data
+
+По умолчанию seed также создаёт демо-разметку Aidata (target_value) для AI-панели,
+если таких записей меньше 20 (внутри вызывается generate_ai_tests). Пропуск:
+  docker compose exec backend python manage.py seed_demo_data --skip-ai-labeled
+
+После seed_demo_data будут учётные записи:
+  Admin:  admin_demo@example.com / AdminPass123!
+  Master: master_demo@example.com / MasterPass123!
+  Client: client_demo@example.com / ClientPass123!
+
+
+3.1) Модель AI (no_show_model.cbm)
+-----------------------------------
+В образ backend ставятся numpy, pandas, catboost (см. Backend/requirements.txt).
+
+При первом старте контейнера backend, если файла модели ещё нет, docker-compose
+автоматически выполнит:
+  python manage.py train_no_show_model --n 8000 --min-accuracy 0.75
+и создаст apps/salon/ai_module/no_show_model.cbm внутри контейнера.
+
+Пересоздать модель вручную (например, после очистки volume или смены параметров):
+  docker compose exec backend python manage.py train_no_show_model --n 12000 --min-accuracy 0.75
+
+Пересчитать Aidata для всех записей:
+  docker compose exec backend python manage.py backfill_ai_data
+
+
+4) Полезные команды Docker
+-------------------------
+Посмотреть статусы контейнеров:
+  docker compose ps
+
+Посмотреть логи (все сервисы):
+  docker compose logs -f
+
+Логи только backend:
+  docker compose logs -f backend
+
+Остановить сервисы:
+  docker compose down
+
+Остановить и удалить данные БД (полная очистка):
+  docker compose down -v
+
+
+5) Если docker compose не стартует
+---------------------------------
+Частая ошибка на Windows:
+  failed to connect to the docker API ... dockerDesktopLinuxEngine ...
+
+Это означает, что Docker Desktop/daemon не запущен или не поднят Linux engine.
+Решение:
+  - Запустить Docker Desktop и дождаться Running
+  - Повторить: docker compose up -d --build
+
+================================================================================

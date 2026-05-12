@@ -1,0 +1,220 @@
+================================================================================
+  ИНСТРУКЦИЯ: AI-МОДУЛЬ (ПРОГНОЗ НЕЯВКИ / NO-SHOW) + AI-ПАНЕЛЬ ВИЗУАЛИЗАЦИИ
+  Проект: STEEL&BLADE (Hair salon booking)
+================================================================================
+
+1) Назначение AI-модуля
+-----------------------
+AI-модуль оценивает вероятность "неявки" клиента на запись (Appointment).
+Результат сохраняется в сущность Aidata и используется в интерфейсе:
+- для администратора: рекомендация (что делать при высоком риске)
+- для мастера: цветовой индикатор риска (green/yellow/red)
+
+Ключевой принцип:
+- Расчёт выполняется по конкретной записи (Appointment) и сохраняется в Aidata.
+- Визуализация AI вынесена в отдельную страницу "AI‑панель" (доступ: admin/master).
+
+
+2) Запуск проекта (Frontend + Backend)
+-------------------------------------
+Вариант запуска зависит от окружения.
+
+2.1) Backend (Django) — dev-сервер
+  Папка: Backend
+  Команды (пример):
+
+  - Создать окружение/установить зависимости:
+      python -m venv .venv
+      .venv\Scripts\activate
+      pip install -r requirements.txt
+    (в requirements.txt включены numpy, pandas, catboost — нужны для инференса.)
+
+  Порядок важен: сначала миграции и модель .cbm, потом seed (внутри seed может
+  вызываться generate_ai_tests — ему нужен catboost и файл модели).
+
+  - Миграции:
+      python manage.py migrate
+
+  - Модель прогноза неявки (CatBoost, файл no_show_model.cbm):
+      python manage.py train_no_show_model --n 8000 --min-accuracy 0.75
+    Один раз после установки зависимостей, если .cbm ещё нет (или чтобы пересобрать).
+    Параметры: --n, --min-accuracy, --flip-prob, --seed.
+    Метрика holdout: apps/salon/ai_module/model_meta.json
+
+  - Демо-данные:
+      python manage.py seed_demo_data
+    При необходимости создаётся демо-разметка Aidata для метрик AI (если target_value < 20).
+    Отключить разметку: python manage.py seed_demo_data --skip-ai-labeled
+
+  - (Опционально) Пересчитать Aidata для уже существующих записей:
+      python manage.py backfill_ai_data
+
+  - Запуск API:
+      python manage.py runserver 127.0.0.1:8000
+
+  Пошаговая шпаргалка (копирование команд): файл ZAPUSK_PO_SHAGAM.txt в корне проекта.
+
+Адрес API:
+  http://127.0.0.1:8000
+OpenAPI schema:
+  http://127.0.0.1:8000/api/schema/
+
+Важно про БД:
+  По умолчанию — PostgreSQL (переменные POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD,
+  POSTGRES_HOST, POSTGRES_PORT). Пароль должен совпадать с паролем пользователя в PostgreSQL.
+
+  Локально без PostgreSQL (файл Backend/db.sqlite3):
+    В PowerShell:  $env:USE_SQLITE = "1"
+    или в .env в корне / в Backend:  USE_SQLITE=1
+  Затем: python manage.py migrate
+
+2.2) Frontend (React + Vite)
+  Папка: Frontend
+  Команды:
+
+  - Установить зависимости:
+      npm install
+
+  - Запуск:
+      npm run dev -- --host 127.0.0.1 --port 8080
+
+Адрес UI:
+  http://127.0.0.1:8080/
+
+2.3) Запуск через Docker
+  Подробная инструкция в корне проекта: INSTRUKCIYA_DOCKER.txt
+  (при первом старте backend при отсутствии .cbm автоматически вызывается
+   train_no_show_model, см. docker-compose.yml).
+
+
+3) Учётные записи (для входа во фронте)
+---------------------------------------
+Вход выполняется по email (поле "Email" + "Пароль").
+
+  Админ:
+    email: abdykhalykov.m@mail.ru
+    pass:  Myrat123!
+    ФИО:   Мырат Абдыхалыков
+
+  Мастера (пароль одинаковый):
+    pass:  MasterPass123!
+    - ivan.petrov@example.com       (Иван Петров)
+    - anna.smirnova@example.com     (Анна Смирнова)
+    - dmitry.kuznetsov@example.com  (Дмитрий Кузнецов)
+    - olga.vasileva@example.com     (Ольга Васильева)
+
+  Клиент:
+    email: egorov.a@mail.ru
+    pass: 123Egorov!
+    email: sergeev.a@mail.ru
+    pass: 123Sergeev!
+    email: smirnov.p@mail.ru
+    pass: 123Smirnov!
+
+Примечание:
+  Демо-аккаунтов *_demo в проекте нет.
+
+
+4) Где находится AI в интерфейсе
+--------------------------------
+4.1) AI на карточке записи
+  Страница:
+    /dashboard/booking/{id}
+
+  Возможности:
+  - показать текущий AI-результат по записи (если он уже сохранён)
+  - кнопка "Рассчитать" вызывает:
+      POST /api/appointments/{id}/predict-no-show/
+    и сохраняет/обновляет Aidata в БД.
+
+4.2) AI‑панель (общая визуализация)
+  Страница:
+    /dashboard/ai
+
+  Доступ:
+    только роли admin и master (пункт меню появляется в сайдбаре).
+
+  Содержимое AI‑панели:
+  - Блок "Модель": тип/версия/обучена ли/дата обучения и список признаков
+  - "История обучения/оценки": список запусков, кнопка "Запустить"
+  - Диаграммы:
+      * линии Accuracy/Precision/Recall/F1 по запускам
+      * bar-график TP/FP/TN/FN (confusion matrix) по последнему запуску
+      * pie-диаграмма распределения green/yellow/red
+      * гистограмма вероятностей по диапазонам (0–10%, 10–25%, ...)
+
+
+5) Как работает прогноз (predict-no-show)
+----------------------------------------
+Эндпоинт:
+  POST /api/appointments/{id}/predict-no-show/
+
+Что делает сервер:
+  1) Собирает признаки по записи и истории клиента/мастера
+  2) Если установлены catboost/pandas/numpy и есть файл
+     Backend/apps/salon/ai_module/no_show_model.cbm — выполняется инференс CatBoost.
+  3) Возвращает:
+     - prediction_probability (в процентах)
+     - master_risk_color (green/yellow/red)
+     - admin_recommendation (текст рекомендации)
+     - inference_time_ms (время инференса)
+     - model_version и снимок признаков
+  4) Сохраняет результат в Aidata.
+
+Если модель или ML-зависимости недоступны:
+  - API predict-no-show отвечает HTTP 503 с текстом подсказки (не ломает остальной API).
+  - После сохранения записи (Appointment) расчёт ИИ не прерывает транзакцию: ошибка
+    пишется в лог Django (уровень warning / exception), см. apps/salon/signals.py.
+
+Инфо о модели:
+  GET /api/ai/model-info/
+
+
+6) История обучения/оценки и метрики качества
+--------------------------------------------
+В проект добавлена сущность "запуск обучения/оценки" (AiTrainingRun) и API:
+
+  - Список запусков:
+      GET /api/ai-training-runs/
+
+  - Создать новый запуск (кнопка "Запустить" в AI‑панели):
+      POST /api/ai-training-runs/run/
+    Параметры:
+      threshold (0..1) — порог классификации
+      notes — комментарий к запуску
+
+Как считаются метрики:
+  Метрики качества вычисляются по тем записям Aidata, где заполнено поле
+  target_value (истинная метка класса).
+
+  target_value:
+    1 = клиент НЕ явился (no_show)
+    0 = клиент явился / запись состоялась
+
+  На основании threshold строится предсказание:
+    y_pred = 1, если probability >= threshold, иначе 0
+
+  Считаются TP/FP/TN/FN и метрики:
+    accuracy, precision, recall, f1
+
+Если метки target_value не заполнены:
+  выборка будет 0, метрики не появятся (это нормально).
+Чтобы метрики появились, нужно разметить хотя бы несколько Aidata:
+  - через Django Admin (вкладка Aidata) или через API обновления Aidata
+    (если включена запись).
+
+
+7) Быстрый чек-лист (если "AI не работает")
+------------------------------------------
+1) Бэкенд жив:
+   открой http://127.0.0.1:8000/api/schema/ (должно быть 200)
+2) Установлены зависимости и есть модель:
+   pip install -r requirements.txt
+   python manage.py train_no_show_model --min-accuracy 0.75
+3) Ты вошёл под admin/master (для клиента AI‑панель и AI на карточке недоступны)
+4) В карточке записи нажми "Рассчитать" (создаст/обновит Aidata)
+5) На AI‑панели нажми "Запустить" (создаст AiTrainingRun — это оценка по разметке)
+6) Если метрики пустые — проверь, что у Aidata есть target_value (разметка).
+7) Если 503 на predict-no-show — читай поле detail ответа; смотри логи backend.
+
+================================================================================
