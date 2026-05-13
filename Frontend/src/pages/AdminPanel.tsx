@@ -1,18 +1,25 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import { Shield, Users, Clock, Trash2 } from "lucide-react";
+import { Shield, Users, Clock, Trash2, Package } from "lucide-react";
 import { Navigate } from "react-router-dom";
 import { getLogs, useAuth } from "@/contexts/AuthContext";
 import { apiFetch } from "@/lib/api";
 import { fetchAppointments } from "@/lib/appointmentsApi";
+import { fetchServices } from "@/lib/servicesApi";
+import AdminServicesTab from "@/components/AdminServicesTab";
 
 type ApiUserRow = {
   id: number;
   full_name: string;
   email: string;
-  role: { role_name: string } | null;
+  role: { id: number; role_name: string } | null;
   registration_date?: string;
+};
+
+type RoleOption = {
+  id: number;
+  role_name: string;
 };
 
 type AuditRow = {
@@ -33,12 +40,30 @@ function roleLabel(roleName: string) {
 
 const AdminPanel = () => {
   const { user } = useAuth();
-  const [activeTab, setActiveTab] = useState<"users" | "logs" | "local">("users");
+  const queryClient = useQueryClient();
+  const [activeTab, setActiveTab] = useState<"users" | "services" | "logs" | "local">("users");
 
   const { data: apiUsers = [], isError: usersError } = useQuery({
     queryKey: ["admin-users"],
     queryFn: () => apiFetch<ApiUserRow[]>("/api/users/"),
     enabled: user?.role === "admin",
+  });
+
+  const { data: roles = [] } = useQuery({
+    queryKey: ["admin-roles"],
+    queryFn: () => apiFetch<RoleOption[]>("/api/roles/"),
+    enabled: user?.role === "admin",
+  });
+
+  const updateRoleMutation = useMutation({
+    mutationFn: ({ userId, roleId }: { userId: number; roleId: number }) =>
+      apiFetch<ApiUserRow>(`/api/users/${userId}/`, {
+        method: "PATCH",
+        body: JSON.stringify({ role_id: roleId }),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+    },
   });
 
   const { data: auditLogs = [], isError: auditError } = useQuery({
@@ -53,16 +78,25 @@ const AdminPanel = () => {
     enabled: user?.role === "admin",
   });
 
+  const { data: servicesList = [] } = useQuery({
+    queryKey: ["admin-services"],
+    queryFn: fetchServices,
+    enabled: user?.role === "admin",
+  });
+
   const localLogs = activeTab === "local" ? getLogs() : [];
 
   const stats = {
     users: user?.role === "admin" ? apiUsers.length : 0,
     bookings: bookings.length,
+    services: servicesList.length,
   };
 
   if (user?.role !== "admin") {
     return <Navigate to="/dashboard" replace />;
   }
+
+  const masterRoleId = roles.find((r) => r.role_name.toLowerCase() === "master")?.id;
 
   return (
     <div className="space-y-6">
@@ -72,14 +106,15 @@ const AdminPanel = () => {
           Администрирование
         </h1>
         <p className="text-muted-foreground text-sm font-body mt-1">
-          Пользователи, журнал сервера и локальные события интерфейса
+          Пользователи, услуги, журнал сервера и локальные события. Роль можно сменить только с «Клиент» на «Мастер».
         </p>
       </div>
 
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         {[
           { label: "Пользователи (API)", value: stats.users },
           { label: "Записи", value: stats.bookings },
+          { label: "Услуги", value: stats.services },
         ].map((s, i) => (
           <motion.div
             key={s.label}
@@ -97,6 +132,7 @@ const AdminPanel = () => {
       <div className="flex gap-1 border-b border-border/20 flex-wrap">
         {[
           { key: "users" as const, label: "Пользователи", icon: Users },
+          { key: "services" as const, label: "Услуги", icon: Package },
           { key: "logs" as const, label: "Журнал сервера", icon: Clock },
           { key: "local" as const, label: "Локальный журнал UI", icon: Clock },
         ].map((tab) => (
@@ -117,7 +153,14 @@ const AdminPanel = () => {
       </div>
 
       {usersError && <p className="text-destructive text-sm">Не удалось загрузить пользователей.</p>}
+      {updateRoleMutation.isError && (
+        <p className="text-destructive text-sm">
+          {updateRoleMutation.error instanceof Error ? updateRoleMutation.error.message : "Не удалось сменить роль."}
+        </p>
+      )}
       {auditError && <p className="text-destructive text-sm">Не удалось загрузить журнал аудита.</p>}
+
+      {activeTab === "services" && <AdminServicesTab />}
 
       {activeTab === "users" && (
         <div className="border border-border/30 overflow-x-auto">
@@ -137,17 +180,34 @@ const AdminPanel = () => {
                   <td className="p-4 text-foreground">{u.full_name}</td>
                   <td className="p-4 text-muted-foreground">{u.email}</td>
                   <td className="p-4">
-                    <span
-                      className={`text-xs border px-2 py-1 ${
-                        u.role?.role_name?.toLowerCase() === "admin"
-                          ? "text-primary border-primary/30"
-                          : u.role?.role_name?.toLowerCase() === "master"
-                            ? "text-blue-400 border-blue-400/30"
-                            : "text-muted-foreground border-border/30"
-                      }`}
-                    >
-                      {roleLabel(u.role?.role_name || "")}
-                    </span>
+                    {u.role?.role_name?.toLowerCase() === "client" && masterRoleId != null ? (
+                      <select
+                        aria-label={`Роль: ${u.full_name}`}
+                        className="bg-secondary/40 border border-border/40 text-foreground text-xs font-body rounded px-2 py-1.5 min-w-[9rem] max-w-full cursor-pointer hover:border-primary/40 focus:outline-none focus:ring-1 focus:ring-primary/50 disabled:opacity-50"
+                        value={u.role.id}
+                        disabled={updateRoleMutation.isPending}
+                        onChange={(e) => {
+                          const roleId = Number(e.target.value);
+                          if (Number.isNaN(roleId) || roleId === u.role?.id || roleId !== masterRoleId) return;
+                          updateRoleMutation.mutate({ userId: u.id, roleId });
+                        }}
+                      >
+                        <option value={u.role.id}>Клиент</option>
+                        <option value={masterRoleId}>Мастер</option>
+                      </select>
+                    ) : (
+                      <span
+                        className={`text-xs border px-2 py-1 inline-block ${
+                          u.role?.role_name?.toLowerCase() === "admin"
+                            ? "text-primary border-primary/30"
+                            : u.role?.role_name?.toLowerCase() === "master"
+                              ? "text-blue-400 border-blue-400/30"
+                              : "text-muted-foreground border-border/30"
+                        }`}
+                      >
+                        {roleLabel(u.role?.role_name || "")}
+                      </span>
+                    )}
                   </td>
                   <td className="p-4 text-muted-foreground hidden md:table-cell">
                     {u.registration_date ? new Date(u.registration_date).toLocaleString("ru-RU") : "—"}

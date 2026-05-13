@@ -6,6 +6,7 @@ import { CalendarDays, Clock, CheckCircle2, XCircle, Search, Eye, Edit, Trash2 }
 import { addLog, useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
 import { fetchAppointments, confirmAppointment, cancelAppointment, type BookingRow } from "@/lib/appointmentsApi";
+import { fetchMasterNoShowStats, type MasterNoShowStat } from "@/lib/mastersApi";
 import { predictNoShowForAppointment } from "@/lib/aiApi";
 
 const statusLabels: Record<string, { label: string; color: string }> = {
@@ -13,6 +14,7 @@ const statusLabels: Record<string, { label: string; color: string }> = {
   confirmed: { label: "Подтверждена", color: "text-primary border-primary/30" },
   completed: { label: "Завершена", color: "text-green-500 border-green-500/30" },
   cancelled: { label: "Отменена", color: "text-destructive border-destructive/30" },
+  no_show: { label: "Неявка", color: "text-orange-500 border-orange-500/30" },
 };
 
 const riskLabels: Record<NonNullable<BookingRow["aiRiskColor"]>, { label: string; color: string }> = {
@@ -34,6 +36,13 @@ const Dashboard = () => {
   const { data: bookings = [], isLoading, isError, error } = useQuery({
     queryKey: ["appointments"],
     queryFn: fetchAppointments,
+  });
+
+  const showMasterNoShow = user?.role === "admin" || user?.role === "master";
+  const { data: masterNoShow = [], isError: masterStatsError } = useQuery({
+    queryKey: ["masters", "no-show-stats"],
+    queryFn: fetchMasterNoShowStats,
+    enabled: showMasterNoShow,
   });
 
   const today = useMemo(() => new Date().toLocaleDateString("sv-SE"), []);
@@ -166,8 +175,47 @@ const Dashboard = () => {
           <option value="confirmed">Подтверждена</option>
           <option value="completed">Завершена</option>
           <option value="cancelled">Отменена</option>
+          <option value="no_show">Неявка</option>
         </select>
       </div>
+
+      {showMasterNoShow && (
+        <div className="border border-border/30 p-4 space-y-2">
+          <p className="font-heading text-sm uppercase tracking-wider text-foreground">Неявки по мастерам</p>
+          <p className="text-muted-foreground text-xs font-body">
+            Доля неявок среди визитов с исходом: неявка / (завершено + неявка). Если таких записей нет — «—».
+          </p>
+          {masterStatsError && <p className="text-destructive text-xs">Не удалось загрузить статистику.</p>}
+          {!masterStatsError && masterNoShow.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm font-body" role="table">
+                <thead>
+                  <tr className="text-muted-foreground text-xs uppercase border-b border-border/30">
+                    <th className="text-left py-2 pr-3">Мастер</th>
+                    <th className="text-left py-2 pr-3">Завершено</th>
+                    <th className="text-left py-2 pr-3">Неявок</th>
+                    <th className="text-left py-2 pr-3">%</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {masterNoShow.map((row: MasterNoShowStat) => (
+                    <tr key={row.master_id} className="border-b border-border/10">
+                      <td className="py-2 pr-3 text-foreground">{row.full_name}</td>
+                      <td className="py-2 pr-3 text-muted-foreground">{row.completed_count}</td>
+                      <td className="py-2 pr-3 text-muted-foreground">{row.no_show_count}</td>
+                      <td className="py-2 pr-3 text-foreground">
+                        {row.no_show_rate_percent !== null && row.no_show_rate_percent !== undefined
+                          ? `${row.no_show_rate_percent.toFixed(1)}%`
+                          : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Table */}
       <div className="border border-border/30 overflow-x-auto">
@@ -193,8 +241,8 @@ const Dashboard = () => {
                   {b.date} {b.time}
                 </td>
                 <td className="p-4">
-                  <span className={`text-xs border px-2 py-1 ${statusLabels[b.status].color}`}>
-                    {statusLabels[b.status].label}
+                  <span className={`text-xs border px-2 py-1 ${(statusLabels[b.status] || statusLabels.pending).color}`}>
+                    {(statusLabels[b.status] || statusLabels.pending).label}
                   </span>
                 </td>
                 {canMasterSeeAiForecast && (
@@ -263,10 +311,6 @@ const Dashboard = () => {
           </tbody>
         </table>
       </div>
-
-      <p className="text-muted-foreground/40 text-xs font-body text-right">
-        ГОСТ Р ИСО 9241 — табличное представление данных
-      </p>
     </div>
   );
 };

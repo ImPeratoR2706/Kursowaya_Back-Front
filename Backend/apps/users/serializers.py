@@ -3,6 +3,7 @@ from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from apps.users.models import AccessRight, Role, User
+from apps.users.permissions import get_role_name
 
 
 class RoleSerializer(serializers.ModelSerializer):
@@ -46,6 +47,28 @@ class UserSerializer(serializers.ModelSerializer):
         )
         read_only_fields = ("registration_date",)
 
+    def validate(self, attrs):
+        request = self.context.get("request")
+        if request is None or "role" not in attrs:
+            return attrs
+        if get_role_name(request.user) != "admin":
+            raise serializers.ValidationError(
+                {"role_id": "Менять роль может только администратор."}
+            )
+        inst = getattr(self, "instance", None)
+        if inst is not None:
+            old = inst.role
+            old_name = (old.role_name or "").strip().lower() if old else ""
+            new_role = attrs["role"]
+            new_name = (new_role.role_name or "").strip().lower() if new_role else ""
+            if old_name != "client" or new_name != "master":
+                raise serializers.ValidationError(
+                    {
+                        "role_id": "Разрешено только назначить мастером пользователя с ролью «Клиент»."
+                    }
+                )
+        return attrs
+
     def create(self, validated_data):
         password = validated_data.pop("password", None)
         user = User(**validated_data)
@@ -53,15 +76,27 @@ class UserSerializer(serializers.ModelSerializer):
             user.set_password(password)
         else:
             user.set_unusable_password()
+        role = user.role
+        if role and (role.role_name or "").strip().lower() == "admin":
+            user.is_staff = True
         user.save()
         return user
 
     def update(self, instance, validated_data):
         password = validated_data.pop("password", None)
+        role_changed = "role" in validated_data
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         if password:
             instance.set_password(password)
+        if role_changed:
+            r = instance.role
+            rn = (r.role_name or "").strip().lower() if r else ""
+            if rn == "admin":
+                instance.is_staff = True
+            else:
+                instance.is_staff = False
+                instance.is_superuser = False
         instance.save()
         return instance
 

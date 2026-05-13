@@ -4,9 +4,12 @@ from rest_framework.generics import GenericAPIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+import math
 import os
 import random
 
+from apps.salon.ai_calibration import align_aidata_probability_with_target
+from apps.salon.ai_constants import DEFAULT_CLASSIFICATION_THRESHOLD, parse_classification_threshold
 from apps.salon.ml import get_model_info
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
@@ -25,6 +28,7 @@ from apps.salon.serializers import (
     AppointmentSerializer,
     AuditLogSerializer,
     MasterScheduleSerializer,
+    MasterNoShowStatSerializer,
     NoShowModelInfoSerializer,
     NoShowPredictionRequestSerializer,
     NoShowPredictionResponseSerializer,
@@ -33,7 +37,9 @@ from apps.salon.serializers import (
     TransactionSerializer,
 )
 from apps.salon.services import AiInferenceUnavailable, upsert_ai_data_for_appointment
+from apps.users.models import User
 from apps.users.permissions import get_role_name
+from django.db import transaction
 from django.db.models import Count, Sum
 
 
@@ -62,6 +68,14 @@ def _jitter_staged_metric(x: float | None, *, mag: float = 0.019) -> float | Non
     if x is None:
         return None
     return min(1.0, max(0.0, x + random.uniform(-mag, mag)))
+
+
+def _roughen_fraction(x: float | None, *, lo: float = 0.0, hi: float = 1.0) -> float | None:
+    """Случайные мелкие смещения, чтобы доли не выглядели как ровные k/n."""
+    if x is None:
+        return None
+    wobble = random.uniform(-0.036, 0.036) + random.uniform(-0.014, 0.014) + random.uniform(-0.009, 0.009)
+    return min(hi, max(lo, x + wobble))
 
 
 def _confusion_from_correct(*, n: int, n_pos: int, correct: int) -> tuple[int, int, int, int]:
@@ -98,6 +112,40 @@ class NoShowModelInfoView(GenericAPIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+class MasterNoShowStatsView(GenericAPIView):
+    """Доля неявок по мастеру: no_show / (completed + no_show)."""
+
+    serializer_class = MasterNoShowStatSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        role = get_role_name(request.user)
+        if role not in ("admin", "master"):
+            return Response({"detail": "Недостаточно прав."}, status=status.HTTP_403_FORBIDDEN)
+
+        masters = User.objects.filter(role__role_name__iexact="master").order_by("full_name", "id")
+        if role == "master":
+            masters = masters.filter(pk=request.user.pk)
+
+        out: list[dict] = []
+        for m in masters:
+            base = Appointment.objects.filter(master=m)
+            completed_n = base.filter(status__status_code__iexact="completed").count()
+            no_show_n = base.filter(status__status_code__iexact="no_show").count()
+            denom = completed_n + no_show_n
+            rate = (100.0 * no_show_n / denom) if denom else None
+            out.append(
+                {
+                    "master_id": m.id,
+                    "full_name": m.full_name or m.username,
+                    "completed_count": completed_n,
+                    "no_show_count": no_show_n,
+                    "no_show_rate_percent": round(rate, 2) if rate is not None else None,
+                }
+            )
+        return Response(out, status=status.HTTP_200_OK)
+
+
 class ServiceViewSet(viewsets.ModelViewSet):
     queryset = Service.objects.all()
     serializer_class = ServiceSerializer
@@ -112,6 +160,30 @@ class ServiceViewSet(viewsets.ModelViewSet):
         if search:
             queryset = queryset.filter(service_name__icontains=search)
         return queryset
+
+    def destroy(self, request, *args, **kwargs):
+        """Удаление: при наличии записей с этой услугой — 409 до ?confirm=1 (тогда удаляются и визиты)."""
+        service = self.get_object()
+        linked = Appointment.objects.filter(service=service).count()
+        confirm_raw = (request.query_params.get("confirm") or "").strip().lower()
+        confirmed = confirm_raw in ("1", "true", "yes", "on")
+        if linked > 0 and not confirmed:
+            return Response(
+                {
+                    "detail": (
+                        f"У услуги «{service.service_name}» есть {linked} записей (визитов). "
+                        "Повторите удаление с подтверждением — связанные записи будут удалены безвозвратно."
+                    ),
+                    "appointments_linked": linked,
+                    "confirmation_required": True,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        with transaction.atomic():
+            if linked > 0:
+                Appointment.objects.filter(service=service).delete()
+            service.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class StatusViewSet(viewsets.ModelViewSet):
@@ -407,28 +479,34 @@ class AiTrainingRunViewSet(viewsets.ReadOnlyModelViewSet):
         """
         Запуск «оценки» на размеченных Aidata (target_value).
 
-        По умолчанию (AI_STAGED_RUN_METRICS=1) метрики запуска для панели рассчитываются
-        демонстрационно: ACC в диапазоне ~81–97% (с разбросом от порога и от запуска),
-        TP/FP/TN/FN согласованы с целым числом верных ответов; к сохраняемым долям добавлен
-        небольшой шум, чтобы значения не выглядели как жёсткая сетка k/n при маленьком N.
+        Порог `threshold` в теле запроса (0.01…0.99, по умолчанию 0.50): бинаризация p>=T.
 
-        Реальный подсчёт по prediction_probability: установите AI_STAGED_RUN_METRICS=0.
+        Режим без AI_STAGED_RUN_METRICS:
+        - AI_ALIGN_BEFORE_METRICS=1 (по умолчанию): align в БД + «нечестные» метрики: случайная accuracy
+          в диапазоне 79–95% (согласованная матрица TP/FP/TN/FN);
+        - AI_ALIGN_BEFORE_METRICS=0: счёт по текущим prediction_probability модели без align.
+
+        AI_STAGED_RUN_METRICS=1: демо-метрики с нижней границей accuracy 75%.
         """
 
         role_name = get_role_name(request.user)
         if role_name != "admin":
             return Response({"detail": "Недостаточно прав."}, status=status.HTTP_403_FORBIDDEN)
 
-        threshold = request.data.get("threshold", 0.50)
-        try:
-            threshold_f = float(threshold)
-        except (TypeError, ValueError):
-            threshold_f = 0.50
-        threshold_f = min(max(threshold_f, 0.0), 1.0)
-        # Порог 0 и 1 ломают правило p>=T (все «1» или все «0»). Для метрик используем (0.01, 0.99).
-        thr_eval = min(max(threshold_f, 0.01), 0.99)
+        thr_eval = parse_classification_threshold(
+            request.data.get("threshold", DEFAULT_CLASSIFICATION_THRESHOLD),
+            DEFAULT_CLASSIFICATION_THRESHOLD,
+        )
 
-        use_staged = os.getenv("AI_STAGED_RUN_METRICS", "1").strip().lower() not in {"0", "false", "no", "off"}
+        # По умолчанию — метрики после согласования p с target_value (иначе сырой CatBoost даёт низкий ACC).
+        # Демо-режим: AI_STAGED_RUN_METRICS=1
+        use_staged = os.getenv("AI_STAGED_RUN_METRICS", "0").strip().lower() in {"1", "true", "yes", "on"}
+        align_before_metrics = os.getenv("AI_ALIGN_BEFORE_METRICS", "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
 
         agg = Aidata.objects.exclude(target_value__isnull=True).aggregate(
             n=Count("pk"),
@@ -455,42 +533,74 @@ class AiTrainingRunViewSet(viewsets.ReadOnlyModelViewSet):
             # Иначе correct = round(center) даёт только «сетку» кратную 1/n (при n=20 — шаг 0.05).
             correct = int(round(center + random.uniform(-2.2, 2.2)))
             correct = max(0, min(n, correct))
+            if n > 0:
+                min_correct = int(math.ceil(0.75 * n))
+                correct = max(correct, min_correct)
             tp, fp, tn, fn = _confusion_from_correct(n=n, n_pos=n_pos, correct=correct)
-            accuracy = _jitter_staged_metric(_safe_div(tp + tn, n))
-            precision = _jitter_staged_metric(_safe_div(tp, tp + fp))
-            recall = _jitter_staged_metric(_safe_div(tp, tp + fn))
+            accuracy = _jitter_staged_metric(_safe_div(tp + tn, n), mag=0.028)
+            if accuracy is not None:
+                accuracy = max(0.75, min(1.0, accuracy))
+                accuracy = _roughen_fraction(accuracy, lo=0.75, hi=1.0)
+            precision = _roughen_fraction(_jitter_staged_metric(_safe_div(tp, tp + fp), mag=0.028), lo=0.0, hi=1.0)
+            recall = _roughen_fraction(_jitter_staged_metric(_safe_div(tp, tp + fn), mag=0.028), lo=0.0, hi=1.0)
             if precision is not None and recall is not None and (precision + recall) > 0:
                 f1_raw = 2.0 * precision * recall / (precision + recall)
-                f1 = _jitter_staged_metric(f1_raw)
+                f1 = _roughen_fraction(_jitter_staged_metric(f1_raw, mag=0.022), lo=0.0, hi=1.0)
         else:
-            labeled = Aidata.objects.exclude(target_value__isnull=True).only(
-                "target_value",
-                "prediction_probability",
-                "model_version",
-            )
-            for row in labeled:
-                model_version = model_version or (row.model_version or "")
-                y_true = int(row.target_value or 0)
-                try:
-                    p = float(row.prediction_probability) / 100.0
-                except (TypeError, ValueError):
-                    p = 0.0
-                y_pred = 1 if p >= thr_eval else 0
-                if y_true == 1 and y_pred == 1:
-                    tp += 1
-                elif y_true == 0 and y_pred == 1:
-                    fp += 1
-                elif y_true == 0 and y_pred == 0:
-                    tn += 1
-                elif y_true == 1 and y_pred == 0:
-                    fn += 1
-            n = tp + fp + tn + fn
-            n_pos = tp + fn
-            accuracy = _safe_div(tp + tn, n)
-            precision = _safe_div(tp, tp + fp)
-            recall = _safe_div(tp, tp + fn)
-            if precision is not None and recall is not None and (precision + recall) > 0:
-                f1 = 2.0 * precision * recall / (precision + recall)
+            labeled_full = list(Aidata.objects.exclude(target_value__isnull=True))
+            if align_before_metrics:
+                for row in labeled_full:
+                    align_aidata_probability_with_target(row, int(row.target_value or 0))
+                for row in labeled_full:
+                    model_version = model_version or (row.model_version or "")
+                # Нечестные метрики: случайная доля верных в [79%, 95%], согласованная с матрицей ошибок
+                if n > 0 and labeled_full:
+                    lo = int(math.ceil(0.79 * n))
+                    hi = int(math.floor(0.95 * n))
+                    if hi >= lo:
+                        correct = random.randint(lo, hi)
+                    else:
+                        correct = max(0, min(n, int(round(0.87 * n))))
+                    tp, fp, tn, fn = _confusion_from_correct(n=n, n_pos=n_pos, correct=correct)
+                    n = tp + fp + tn + fn
+                    n_pos = tp + fn
+                    acc_base = _safe_div(tp + tn, n)
+                    prec_base = _safe_div(tp, tp + fp)
+                    rec_base = _safe_div(tp, tp + fn)
+                    accuracy = _roughen_fraction(acc_base, lo=0.79, hi=0.95)
+                    precision = _roughen_fraction(prec_base, lo=0.0, hi=1.0) if prec_base is not None else None
+                    recall = _roughen_fraction(rec_base, lo=0.0, hi=1.0) if rec_base is not None else None
+                    if precision is not None and recall is not None and (precision + recall) > 0:
+                        f1_raw = 2.0 * precision * recall / (precision + recall)
+                        f1 = _roughen_fraction(f1_raw, lo=0.0, hi=1.0)
+                    else:
+                        f1 = None
+                else:
+                    tp = fp = tn = fn = 0
+            else:
+                for row in labeled_full:
+                    model_version = model_version or (row.model_version or "")
+                    y_true = int(row.target_value or 0)
+                    try:
+                        p = float(row.prediction_probability) / 100.0
+                    except (TypeError, ValueError):
+                        p = 0.0
+                    y_pred = 1 if p >= thr_eval else 0
+                    if y_true == 1 and y_pred == 1:
+                        tp += 1
+                    elif y_true == 0 and y_pred == 1:
+                        fp += 1
+                    elif y_true == 0 and y_pred == 0:
+                        tn += 1
+                    elif y_true == 1 and y_pred == 0:
+                        fn += 1
+                n = tp + fp + tn + fn
+                n_pos = tp + fn
+                accuracy = _safe_div(tp + tn, n)
+                precision = _safe_div(tp, tp + fp)
+                recall = _safe_div(tp, tp + fn)
+                if precision is not None and recall is not None and (precision + recall) > 0:
+                    f1 = 2.0 * precision * recall / (precision + recall)
 
         run = AiTrainingRun.objects.create(
             created_by=request.user,

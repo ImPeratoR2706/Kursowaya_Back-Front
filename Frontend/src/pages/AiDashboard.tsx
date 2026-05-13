@@ -34,6 +34,14 @@ function toNum(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/** API хранит accuracy/precision как долю 0..1 */
+function formatFractionMetric(v: unknown): string {
+  const n = toNum(v);
+  if (n === null) return "—";
+  const pct = n <= 1 ? n * 100 : n;
+  return `${pct.toFixed(2)}%`;
+}
+
 function shortDt(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
@@ -164,9 +172,6 @@ const AiDashboard = () => {
           <h1 className="font-heading text-3xl font-bold text-foreground uppercase italic flex items-center gap-3">
             <Brain className="w-6 h-6 text-primary" /> AI-панель
           </h1>
-          <p className="text-muted-foreground font-body text-sm mt-2">
-            История обучения/оценки, метрики качества и распределение прогнозов по риску.
-          </p>
         </div>
         <Link
           to="/dashboard"
@@ -241,7 +246,7 @@ const AiDashboard = () => {
                 className="w-full bg-secondary/50 border border-border/40 text-foreground font-body text-sm px-4 py-3 focus:outline-none focus:border-primary transition-colors"
                 placeholder="0.50"
                 inputMode="decimal"
-                title="Значения 0 и 1 искажают метрики; при отправке порог ограничивается диапазоном 0.01–0.99"
+                title="Класс «неявка», если p ≥ порог (после согласования с разметкой метрики стабильны)"
               />
             </div>
             <div className="md:col-span-2">
@@ -260,13 +265,6 @@ const AiDashboard = () => {
               {runMutation.error instanceof Error ? runMutation.error.message : "Не удалось выполнить запуск"}
             </p>
           )}
-
-          <div className="mt-4 border border-border/30 bg-secondary/20 p-4">
-            <p className="text-muted-foreground text-xs font-body">
-              Метрики рассчитываются по AI-данным, где заполнено поле <span className="text-foreground">target_value</span> (истинный класс).
-              Если размеченных данных нет — выборка будет 0, и метрики не появятся.
-            </p>
-          </div>
         </div>
       </div>
 
@@ -279,12 +277,13 @@ const AiDashboard = () => {
                 <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
                 <XAxis dataKey="at" tick={{ fontSize: 10 }} />
                 <YAxis domain={[0, 1]} tick={{ fontSize: 10 }} />
-                <Tooltip />
+                <Tooltip formatter={(v: unknown) => [formatFractionMetric(v), ""]} />
                 <Legend />
                 <Line type="monotone" dataKey="accuracy" stroke="hsl(var(--primary))" dot={false} />
                 <Line type="monotone" dataKey="precision" stroke="#22c55e" dot={false} />
                 <Line type="monotone" dataKey="recall" stroke="#eab308" dot={false} />
                 <Line type="monotone" dataKey="f1" stroke="#ef4444" dot={false} />
+                <Line type="monotone" dataKey="threshold" stroke="#94a3b8" dot={false} strokeDasharray="4 4" />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -316,16 +315,16 @@ const AiDashboard = () => {
           {lastRun && (
             <div className="mt-3 grid grid-cols-2 gap-2 text-xs font-body text-muted-foreground">
               <div>
-                Accuracy: <span className="text-foreground">{String(lastRun.accuracy ?? "—")}</span>
+                Accuracy: <span className="text-foreground">{formatFractionMetric(lastRun.accuracy)}</span>
               </div>
               <div>
-                F1: <span className="text-foreground">{String(lastRun.f1 ?? "—")}</span>
+                F1: <span className="text-foreground">{formatFractionMetric(lastRun.f1)}</span>
               </div>
               <div>
-                Precision: <span className="text-foreground">{String(lastRun.precision ?? "—")}</span>
+                Precision: <span className="text-foreground">{formatFractionMetric(lastRun.precision)}</span>
               </div>
               <div>
-                Recall: <span className="text-foreground">{String(lastRun.recall ?? "—")}</span>
+                Recall: <span className="text-foreground">{formatFractionMetric(lastRun.recall)}</span>
               </div>
             </div>
           )}
@@ -392,8 +391,8 @@ const AiDashboard = () => {
                   <td className="py-2 pr-3 whitespace-nowrap">{shortDt(r.created_at)}</td>
                   <td className="py-2 pr-3">{r.n_samples}</td>
                   <td className="py-2 pr-3">{String(r.threshold)}</td>
-                  <td className="py-2 pr-3">{String(r.accuracy ?? "—")}</td>
-                  <td className="py-2 pr-3">{String(r.f1 ?? "—")}</td>
+                  <td className="py-2 pr-3">{formatFractionMetric(r.accuracy)}</td>
+                  <td className="py-2 pr-3">{formatFractionMetric(r.f1)}</td>
                   <td className="py-2 pr-3 text-muted-foreground">{r.notes || "—"}</td>
                 </tr>
               ))}

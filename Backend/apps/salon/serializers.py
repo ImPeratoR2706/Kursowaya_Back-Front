@@ -249,6 +249,16 @@ class NoShowPredictionResponseSerializer(serializers.Serializer):
     target_value = serializers.IntegerField(required=False, allow_null=True)
 
 
+class MasterNoShowStatSerializer(serializers.Serializer):
+    """Один элемент ответа GET /api/masters/no-show-stats/."""
+
+    master_id = serializers.IntegerField()
+    full_name = serializers.CharField()
+    completed_count = serializers.IntegerField()
+    no_show_count = serializers.IntegerField()
+    no_show_rate_percent = serializers.FloatField(allow_null=True, required=False)
+
+
 class NoShowModelInfoSerializer(serializers.Serializer):
     is_trained = serializers.BooleanField()
     model_type = serializers.CharField()

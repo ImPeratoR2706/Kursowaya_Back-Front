@@ -6,6 +6,7 @@ from apps.salon.views import (
     AiTrainingRunViewSet,
     AppointmentViewSet,
     AuditLogViewSet,
+    MasterNoShowStatsView,
     MasterScheduleViewSet,
     NoShowModelInfoView,
     ServiceViewSet,
@@ -25,4 +26,5 @@ router.register("audit-logs", AuditLogViewSet, basename="audit-log")
 
 urlpatterns = [
     path("ai/model-info/", NoShowModelInfoView.as_view(), name="ai-model-info"),
+    path("masters/no-show-stats/", MasterNoShowStatsView.as_view(), name="master-no-show-stats"),
 ] + router.urls

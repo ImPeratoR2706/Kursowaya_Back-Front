@@ -17,6 +17,7 @@ const statusLabels: Record<string, { label: string; color: string }> = {
   confirmed: { label: "Подтверждена", color: "text-primary border-primary/30 bg-primary/5" },
   completed: { label: "Завершена", color: "text-green-500 border-green-500/30 bg-green-500/5" },
   cancelled: { label: "Отменена", color: "text-destructive border-destructive/30 bg-destructive/5" },
+  no_show: { label: "Неявка", color: "text-orange-500 border-orange-500/30 bg-orange-500/5" },
 };
 
 const riskLabel: Record<string, { label: string; cls: string }> = {

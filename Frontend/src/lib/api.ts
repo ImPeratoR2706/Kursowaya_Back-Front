@@ -45,7 +45,7 @@ async function refreshAccessToken(): Promise<boolean> {
   return true;
 }
 
-function parseErrorDetail(text: string): string {
+export function parseErrorDetail(text: string): string {
   try {
     const j = JSON.parse(text) as Record<string, unknown>;
     if (typeof j.detail === "string") return j.detail;
@@ -98,4 +98,32 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   }
 
   return res.json() as Promise<T>;
+}
+
+/**
+ * Запрос к API с тем же JWT и обновлением access, что и у {@link apiFetch};
+ * возвращает «сырой» {@link Response} — статус и тело обрабатывает вызывающий код.
+ */
+export async function apiRequest(path: string, init?: RequestInit): Promise<Response> {
+  const base = getApiBase();
+  const url = `${base}${path.startsWith("/") ? path : `/${path}`}`;
+  const headers = new Headers(init?.headers);
+  if (init?.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  const access = localStorage.getItem(STORAGE_ACCESS);
+  if (access) headers.set("Authorization", `Bearer ${access}`);
+
+  const doFetch = () => fetch(url, { ...init, headers });
+
+  let res = await doFetch();
+  if (res.status === 401 && localStorage.getItem(STORAGE_REFRESH)) {
+    const ok = await refreshAccessToken();
+    if (ok) {
+      headers.set("Authorization", `Bearer ${localStorage.getItem(STORAGE_ACCESS)}`);
+      res = await fetch(url, { ...init, headers });
+    }
+  }
+
+  return res;
 }

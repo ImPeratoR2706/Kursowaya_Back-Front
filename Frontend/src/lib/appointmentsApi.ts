@@ -27,7 +27,7 @@ export type BookingRow = {
   service: string;
   date: string;
   time: string;
-  status: "pending" | "confirmed" | "completed" | "cancelled";
+  status: "pending" | "confirmed" | "completed" | "cancelled" | "no_show";
   price: number;
   notes?: string;
   aiProbability?: number | null; // 0..100
@@ -36,7 +36,7 @@ export type BookingRow = {
 
 function statusFromCode(code: string | undefined): BookingRow["status"] {
   const c = (code || "").toLowerCase();
-  if (c === "pending" || c === "confirmed" || c === "completed" || c === "cancelled") {
+  if (c === "pending" || c === "confirmed" || c === "completed" || c === "cancelled" || c === "no_show") {
     return c;
   }
   return "pending";

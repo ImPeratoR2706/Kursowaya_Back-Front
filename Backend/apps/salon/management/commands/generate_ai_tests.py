@@ -8,6 +8,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.salon.ai_calibration import align_aidata_probability_with_target
+from apps.salon.ai_constants import parse_classification_threshold
+from apps.salon.business_hours import normalize_slot_start
 from apps.salon.models import AiTrainingRun, Appointment, Service, Status
 from apps.salon.services import AiInferenceUnavailable, upsert_ai_data_for_appointment
 from apps.users.models import Role, User
@@ -29,7 +31,12 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--n", type=int, default=20, help="Сколько тестов сгенерировать (минимум 20).")
-        parser.add_argument("--threshold", type=float, default=0.50, help="Порог для расчёта метрик (0..1).")
+        parser.add_argument(
+            "--threshold",
+            type=float,
+            default=None,
+            help="Порог для расчёта метрик (0..1); по умолчанию 0.50, в расчёте ограничивается 0.01–0.99.",
+        )
         parser.add_argument("--notes", type=str, default="auto: generated testset", help="Комментарий для AiTrainingRun.")
 
     @transaction.atomic
@@ -37,9 +44,7 @@ class Command(BaseCommand):
         n = int(options["n"] or 20)
         if n < 20:
             n = 20
-        threshold = float(options["threshold"] if options["threshold"] is not None else 0.5)
-        threshold = min(max(threshold, 0.0), 1.0)
-        thr_eval = min(max(threshold, 0.01), 0.99)
+        thr_eval = parse_classification_threshold(options.get("threshold"), 0.5)
         notes = str(options["notes"] or "")
 
         # Ensure base objects exist (compatible with seed_demo_data.py defaults).
@@ -118,9 +123,11 @@ class Command(BaseCommand):
 
         duration_min = max(int(service.duration_minutes or 60), 1)
         slot_step = timedelta(minutes=duration_min)
-        anchor = (timezone.now() + timedelta(days=2)).replace(hour=8, minute=0, second=0, microsecond=0)
+        anchor = (timezone.now() + timedelta(days=2)).replace(hour=10, minute=0, second=0, microsecond=0)
+        raw_cursor = anchor
         first_start = anchor
         for _ in range(10_000):
+            first_start = normalize_slot_start(raw_cursor, duration_min)
             slot_end = first_start + slot_step
             clash = Appointment.objects.filter(
                 master_id=master_user.id,
@@ -129,7 +136,7 @@ class Command(BaseCommand):
             ).exclude(status__status_code__iexact="cancelled")
             if not clash.exists():
                 break
-            first_start += timedelta(minutes=15)
+            raw_cursor = first_start + timedelta(minutes=15)
         else:
             raise CommandError(
                 "Не найдено свободного окна для демо-записей мастера. "
@@ -138,9 +145,11 @@ class Command(BaseCommand):
 
         created = 0
         probs: list[float] = []
+        slot_cursor = first_start
         for i, tc in enumerate(cases):
             # Create a new appointment for each test to keep Aidata 1:1.
-            start_dt = first_start + timedelta(minutes=duration_min * i)
+            start_dt = normalize_slot_start(slot_cursor, duration_min)
+            slot_cursor = start_dt + timedelta(minutes=duration_min)
             appt = Appointment.objects.create(
                 client=client_user,
                 master=master_user,
@@ -210,7 +219,7 @@ class Command(BaseCommand):
         run = AiTrainingRun.objects.create(
             created_by=admin_user,
             model_version=model_version,
-            threshold=round(thr_eval, 2),
+            threshold=round(float(thr_eval), 2),
             n_samples=total,
             n_positive=n_pos,
             accuracy=accuracy,
@@ -228,7 +237,7 @@ class Command(BaseCommand):
         if probs:
             self.stdout.write(f"Диапазон вероятностей (в %): min={min(probs):.2f}, max={max(probs):.2f}")
         self.stdout.write(
-            f"Метрики @thr={threshold:.2f}: n={total}, pos={n_pos}, "
+            f"Метрики @thr={thr_eval:.2f}: n={total}, pos={n_pos}, "
             f"acc={accuracy if accuracy is not None else '—'}, "
             f"prec={precision if precision is not None else '—'}, "
             f"rec={recall if recall is not None else '—'}, "

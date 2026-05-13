@@ -44,11 +44,14 @@ class Command(BaseCommand):
                 permission=permission,
             )
 
+        # master_demo — тот же мастер, что в generate_ai_tests (AI-тесты); должен существовать до seed_ai_training_clients,
+        # иначе у него останутся только pending-записи «AI test» и в статистике неявок будет 0 завершённых / 0 неявок.
         extra_masters_seed = [
             ("master_ivan", "Иван Петров", "ivan.petrov@example.com"),
             ("master_anna", "Анна Смирнова", "anna.smirnova@example.com"),
             ("master_dmitry", "Дмитрий Кузнецов", "dmitry.kuznetsov@example.com"),
             ("master_olga", "Ольга Васильева", "olga.vasileva@example.com"),
+            ("master_demo", "Ольга Морозова", "master_demo@example.com"),
         ]
         extra_masters = []
         for username, full_name, email in extra_masters_seed:
